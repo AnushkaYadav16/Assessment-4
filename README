@@ -1,1 +1,9 @@
 Task - 4
+
+python script.py --stack-name my-stack-RDS --db-password MySecurePass123!
+aws cloudformation delete-stack --stack-name my-stack-RDS
+
+mysql -h mydb-instance.cjmqo8kwu728.ap-south-1.rds.amazonaws.com -u admin -p mydb-instance
+
+
+

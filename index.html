@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Banking Info</title>
+    <style>
+        table {
+            border-collapse: collapse;
+            margin-top: 15px;
+            width: 70%;
+        }
+        th, td {
+            border: 1px solid #999;
+            padding: 8px 12px;
+            text-align: left;
+        }
+        th {
+            background: #eee;
+        }
+    </style>
+</head>
+<body>
+    <h1>Banking Dashboard</h1>
+
+    <label for="customerId">Customer ID:</label>
+    <input type="text" id="customerId" placeholder="Enter Customer ID">
+    <br><br>
+
+    <button onclick="getAllDetails()">Get All Details</button>
+
+    <div id="output"></div>
+
+    <script>
+        const baseUrl = 'https://1cj8u8z06f.execute-api.ap-south-1.amazonaws.com/dev';
+
+        async function getAllDetails() {
+            const customerId = document.getElementById('customerId').value;
+            const output = document.getElementById('output');
+
+            if (!customerId) {
+                alert("Please enter a customer ID");
+                return;
+            }
+
+            output.innerHTML = "<p>Loading...</p>";
+
+            try {
+                const [accountRes, transactionRes] = await Promise.all([
+                    fetch(`${baseUrl}/account-details/${customerId}`),
+                    fetch(`${baseUrl}/transaction-details/${customerId}`)
+                ]);
+
+                if (!accountRes.ok || !transactionRes.ok) {
+                    throw new Error(`API returned error(s): Account - ${accountRes.status}, Transaction - ${transactionRes.status}`);
+                }
+
+                const [accountData, transactionData] = await Promise.all([
+                    accountRes.json(),
+                    transactionRes.json()
+                ]);
+
+                const combinedResult = {
+                    accountDetails: accountData.data,
+                    transactionSummary: transactionData.data
+                };
+
+                renderTables(combinedResult);
+            } catch (error) {
+                output.innerHTML = `<p style="color:red;">Error: ${error.message}</p>`;
+            }
+        }
+
+        function renderTables(data) {
+            let html = '';
+
+            // Account Details Table
+            if (data.accountDetails && data.accountDetails.length > 0) {
+                html += `<h2>Account Details</h2>`;
+                html += `<table><thead><tr>
+                    <th>Account ID</th>
+                    <th>Customer ID</th>
+                    <th>Account Type</th>
+                    <th>Balance</th>
+                </tr></thead><tbody>`;
+
+                data.accountDetails.forEach(acc => {
+                    html += `<tr>
+                        <td>${acc.account_id}</td>
+                        <td>${acc.customer_id}</td>
+                        <td>${acc.account_type}</td>
+                        <td>${acc.balance}</td>
+                    </tr>`;
+                });
+
+                html += `</tbody></table>`;
+            } else {
+                html += `<p>No account details found.</p>`;
+            }
+
+            // Transaction Summary Table
+            if (data.transactionSummary && data.transactionSummary.length > 0) {
+                html += `<h2>Transaction Summary</h2>`;
+                html += `<table><thead><tr>
+                    <th>Transaction Count</th>
+                    <th>Total Amount</th>
+                </tr></thead><tbody>`;
+
+                data.transactionSummary.forEach(txn => {
+                    html += `<tr>
+                        <td>${txn.transaction_count}</td>
+                        <td>${txn.total_amount}</td>
+                    </tr>`;
+                });
+
+                html += `</tbody></table>`;
+            } else {
+                html += `<p>No transaction summary available.</p>`;
+            }
+
+            document.getElementById('output').innerHTML = html;
+        }
+    </script>
+</body>
+</html>
+
+
+
+
+
+

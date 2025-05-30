@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: RDS MySQL with Secrets Manager and Lambda Setup
+
+Parameters:
+  DBUsername:
+    Type: String
+    Default: admin
+  DBPassword:
+    Type: String
+    NoEcho: true
+  DBName:
+    Type: String
+    Default: mydb
+  S3Bucket:
+    Type: String
+    Description: S3 bucket where the Lambda deployment package is stored
+  S3Key:
+    Type: String
+    Description: S3 key (path) of the Lambda deployment package
+  ACCKey:
+    Type: String
+    Description: S3 key (path) of the Account Lambda deployment package
+  TRANSKey:
+    Type: String
+    Description: S3 key (path) of the Transaction Lambda deployment package
+  LambdaSG:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group for Lambda
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC where RDS and Lambda are deployed
+
+Resources:
+
+  # Secrets Manager for MySQL credentials
+  MySQLSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: RDSMySQLSecret
+      Description: MySQL credentials
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}"
+        }
+
+  LambdaSG1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Lambda to access RDS
+      VpcId: !Ref DefaultVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.2.0/24
+ 
+  # default vpc
+  DefaultVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+ 
+  MyPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DefaultVPC
+      CidrBlock: "10.0.1.0/24"  
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]  
+      MapPublicIpOnLaunch: true  
+ 
+  MyPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DefaultVPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+ 
+  # subnet group
+  FinancePortalRDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS instance
+      SubnetIds:
+        - !Ref MyPublicSubnet  # Add subnet IDs explicitly
+        - !Ref MyPrivateSubnet
+ 
+ 
+    # 1. Internet Gateway for your VPC
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+ 
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DefaultVPC
+      InternetGatewayId: !Ref InternetGateway
+ 
+  # 2. Route Table for Public Subnet
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DefaultVPC
+ 
+  # 3. Route for Internet traffic via Internet Gateway
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+ 
+  # 4. Associate Public Subnet with the Public Route Table
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MyPublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+ 
+  # 5. Elastic IP for NAT Gateway
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+ 
+  # 6. NAT Gateway in the Public Subnet
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref MyPublicSubnet
+ 
+  # 7. Route Table for Private Subnet
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DefaultVPC
+ 
+  # 8. Associate Private Subnet with Private Route Table
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MyPrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+ 
+  # 9. Route for Private Subnet traffic via NAT Gateway
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+ 
+  # MySQL RDS instance
+  MySQLDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: mydb-instance
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      MasterUsername: !Ref DBUsername
+      # ManageMasterUserPassword: true
+      MasterUserPassword: !Ref DBPassword
+      DBName: !Ref DBName
+      PubliclyAccessible: true
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      StorageType: gp2
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref FinancePortalRDSSubnetGroup
+        
+
+  # RDS Security Group
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for RDS MySQL"
+      VpcId: !Ref DefaultVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSG1
+          # CidrIp: 0.0.0.0/0
+
+  # IAM Role for Lambda
+  
+  RDSLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: RDSLambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaVPCAndSecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:Connect
+                Resource: "*"
+ 
+  # Lambda function to initialize MySQL DB
+  DBInitFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: InitMySQLTables
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.11
+      Timeout: 300
+      Role: !GetAtt RDSLambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref S3Key
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt MySQLDB.Endpoint.Address
+          DB_NAME: !Ref DBName
+          SECRET_NAME: !Ref MySQLSecret
+      VpcConfig:
+        SubnetIds:
+          - !Ref MyPrivateSubnet
+          # - !Ref MyPrivateSubnet
+        SecurityGroupIds:
+          - !Ref LambdaSG1
+
+  GetAccountsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GetAccountsLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GetAccountsLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - rds:DescribeDBInstances
+                  - rds:Connect
+                Resource: "*"
+
+  ServerlessFinanceTransactionDetailRouteApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+
+  ServerlessFinanceTransactionDetailRouteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: GetCustomerAccountsDetails
+      CodeUri:
+        Bucket: !Ref S3Bucket
+        Key: !Ref ACCKey
+      Handler: get_accounts.lambda_handler
+      Runtime: python3.11
+      Role: !GetAtt GetAccountsLambdaRole.Arn
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt MySQLDB.Endpoint.Address
+          DB_NAME: !Ref DBName
+          SECRET_NAME: !Ref MySQLSecret
+      VpcConfig:
+        SubnetIds:
+          - !Ref MyPrivateSubnet
+          # - !Ref MyPrivateSubnet
+        SecurityGroupIds:
+          - !Ref LambdaSG1
+      Events:
+        UsersApi:
+          Type: Api
+          Properties:
+            Path: /account-details/{customerId}
+            Method: get
+            RestApiId: !Ref ServerlessFinanceTransactionDetailRouteApi
+
+  GetTransactionsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GetTransactionsLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GetTransactionsLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - rds:DescribeDBInstances
+                  - rds:Connect
+                Resource: "*"
+
+  ServerlessFinanceTransactionSummaryRouteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: GetCustomerTransactionsDetails
+      CodeUri:
+        Bucket: !Ref S3Bucket
+        Key: !Ref TRANSKey
+      Handler: get_transactions.lambda_handler
+      Runtime: python3.11
+      Role: !GetAtt GetTransactionsLambdaRole.Arn
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt MySQLDB.Endpoint.Address
+          DB_NAME: !Ref DBName
+          SECRET_NAME: !Ref MySQLSecret
+      VpcConfig:
+        SubnetIds:
+          - !Ref MyPrivateSubnet
+          # - !Ref MyPrivateSubnet
+        SecurityGroupIds:
+          - !Ref LambdaSG1
+      Events:
+        UsersApi:
+          Type: Api
+          Properties:
+            Path: /transaction-details/{customerId}
+            Method: get
+            RestApiId: !Ref ServerlessFinanceTransactionDetailRouteApi
